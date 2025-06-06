@@ -1,0 +1,20 @@
+[tool.poetry]
+name = "asentrx-web-monitor"
+version = "0.1.0"
+description = "A Python script to periodically send a configured public IP to a webservice."
+authors = ["Felix Frei <felix.frei@gmx.ch>"]
+readme = "README.md"
+packages = [{include = "main.py"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+requests = "^2.31.0"
+python-dotenv = "^1.0.0"
+beautifulsoup4 = "4.13.4"
+pydantic = "2.11.5"
+pydantic-ai ="0.2.12"
+sentry-sdk = "^2.29.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

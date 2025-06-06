@@ -1,0 +1,5 @@
+.idea
+.env
+.venv
+venv
+processed_article_urls.txt

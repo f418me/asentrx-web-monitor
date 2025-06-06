@@ -1,0 +1,32 @@
+# fly.toml app configuration file generated for asentrx-web-monitor on 2025-06-05T11:53:55+02:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'asentrx-web-monitor'
+primary_region = 'arn'
+
+[build]
+
+[env]
+  INTERVAL_SECONDS = '60'
+  WEBSERVICE_HOST = 'your-webservice-host.com'
+  WEBSERVICE_PORT = '443'
+  LOG_LEVEL='DEBUG'
+  MONITOR_BASE_URL='https://www.federalreserve.gov'
+  MONITOR_MAIN_PAGE_PATH='/'
+  MONITOR_INTERVAL_SECONDS='300'
+  MONITOR_RECENT_ARTICLES_COUNT='2'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
+
+[[vm]]
+  memory = '512mb'
+  cpu_kind = 'shared'
+  cpus = 1

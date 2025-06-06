@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  web-monitor:
+    build: ../../Downloads/asentrx-web-monitor # Build the image using the Dockerfile in the current directory
+    container_name: asentrx_web_monitor_instance
+    # Load environment variables from the .env file.
+    # Make sure to create a .env file based on .env.example with your actual values.
+    env_file:
+      - ../../Downloads/asentrx-web-monitor/.env
+    restart: on-failure # Restart the container if it exits with a non-zero status
+    logging:
+      driver: "json-file" # Use json-file driver for easy log aggregation
+      options:
+        max-size: "10m"
+        max-file: "5"
