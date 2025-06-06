@@ -1,0 +1,6 @@
+.idea
+.venv/**/*
+venv/**/*
+fly.toml
+.env
+processed_article_urls.txt
