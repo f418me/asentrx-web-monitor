@@ -10,8 +10,7 @@ primary_region = 'arn'
 
 [env]
   INTERVAL_SECONDS = '60'
-  WEBSERVICE_HOST = 'your-webservice-host.com'
-  WEBSERVICE_PORT = '443'
+  WEBSERVICE_URL = 'https://asentrx-trade-decision-engine.fly.dev/notify/web-monitor'
   LOG_LEVEL='DEBUG'
   MONITOR_BASE_URL='https://www.federalreserve.gov'
   MONITOR_MAIN_PAGE_PATH='/'

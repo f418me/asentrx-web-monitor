@@ -263,12 +263,9 @@ def main():
     """
     Main function to load environment variables and periodically send data.
     """
-    # load_dotenv() is already called at the top of the file
-
     # --- Configuration from Environment Variables ---
     fly_public_ip = os.getenv("FLY_PUBLIC_IP")
-    webservice_host = os.getenv("WEBSERVICE_HOST")
-    webservice_port = os.getenv("WEBSERVICE_PORT")
+    webservice_url = os.getenv("WEBSERVICE_URL")
 
     monitor_base_url = os.getenv("MONITOR_BASE_URL", "https://www.federalreserve.gov")
     monitor_main_page_path = os.getenv("MONITOR_MAIN_PAGE_PATH", "/")
@@ -281,11 +278,8 @@ def main():
     if not fly_public_ip:
         logging.error("Error: FLY_PUBLIC_IP environment variable not set. Exiting.")
         return
-    if not webservice_host:
-        logging.error("Error: WEBSERVICE_HOST environment variable not set. Exiting.")
-        return
-    if not webservice_port:
-        logging.error("Error: WEBSERVICE_PORT environment variable not set. Exiting.")
+    if not webservice_url:
+        logging.error("Error: WEBSERVICE_URL environment variable not set. Exiting.")
         return
 
     try:
@@ -306,7 +300,6 @@ def main():
             f"Error: MONITOR_RECENT_ARTICLES_COUNT must be a positive integer. Got '{monitor_recent_articles_count_str}'. Exiting.")
         return
 
-    webservice_url = f"https://{webservice_host}:{webservice_port}"
     monitor_full_main_page_url = urljoin(monitor_base_url, monitor_main_page_path)
 
     logging.info(f"Monitor configured to send IP '{fly_public_ip}' to '{webservice_url}'.")
