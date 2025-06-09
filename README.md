@@ -28,3 +28,12 @@ First, clone this repository to your local machine:
 ```bash
 git clone https://github.com/your-username/asentrx-web-monitor.git
 cd asentrx-web-monitor
+```
+
+### Modes
+
+Use the following environment variables to control the polling interval:
+
+* `MONITOR_MODE` – set to `production` for faster checks, otherwise `normal`.
+* `MONITOR_INTERVAL_SECONDS` – interval in seconds when in normal mode.
+* `MONITOR_PROD_MIN_SECONDS` and `MONITOR_PROD_MAX_SECONDS` – random interval range used in production mode.

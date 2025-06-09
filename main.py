@@ -3,6 +3,7 @@ import time
 import requests
 import logging
 import uuid
+import random
 from typing import Optional, Literal, Set, List, Dict
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -273,6 +274,9 @@ def main():
     monitor_recent_articles_count_str = os.getenv("MONITOR_RECENT_ARTICLES_COUNT", "5")
     monitor_keyword = os.getenv("MONITOR_KEYWORD", "").lower().strip()
     monitor_title_keyword = os.getenv("MONITOR_TITLE_KEYWORD", "").lower().strip()
+    monitor_mode = os.getenv("MONITOR_MODE", "normal").lower().strip()
+    monitor_prod_min_seconds_str = os.getenv("MONITOR_PROD_MIN_SECONDS", "10")
+    monitor_prod_max_seconds_str = os.getenv("MONITOR_PROD_MAX_SECONDS", "20")
 
     # Validate essential environment variables
     if not fly_public_ip:
@@ -300,12 +304,32 @@ def main():
             f"Error: MONITOR_RECENT_ARTICLES_COUNT must be a positive integer. Got '{monitor_recent_articles_count_str}'. Exiting.")
         return
 
+    # Validate monitor mode and production interval range
+    valid_modes = {"normal", "production"}
+    if monitor_mode not in valid_modes:
+        logging.error(
+            f"Error: MONITOR_MODE must be one of {valid_modes}. Got '{monitor_mode}'. Exiting.")
+        return
+    try:
+        monitor_prod_min_seconds = int(monitor_prod_min_seconds_str)
+        monitor_prod_max_seconds = int(monitor_prod_max_seconds_str)
+        if monitor_prod_min_seconds <= 0 or monitor_prod_max_seconds < monitor_prod_min_seconds:
+            raise ValueError
+    except ValueError:
+        logging.error(
+            "Error: MONITOR_PROD_MIN_SECONDS and MONITOR_PROD_MAX_SECONDS must be positive integers and MAX >= MIN. Exiting.")
+        return
+
     monitor_full_main_page_url = urljoin(monitor_base_url, monitor_main_page_path)
 
     logging.info(f"Monitor configured to send IP '{fly_public_ip}' to '{webservice_url}'.")
     logging.info(f"Webpage monitoring: Base URL='{monitor_base_url}', Main Page='{monitor_full_main_page_url}'.")
-    logging.info(
-        f"Checking {monitor_recent_articles_count} most recent articles every {monitor_interval_seconds} seconds.")
+    if monitor_mode == "production":
+        logging.info(
+            f"Checking {monitor_recent_articles_count} most recent articles every {monitor_prod_min_seconds}-{monitor_prod_max_seconds} seconds (random).")
+    else:
+        logging.info(
+            f"Checking {monitor_recent_articles_count} most recent articles every {monitor_interval_seconds} seconds.")
     if monitor_title_keyword:
         logging.info(f"Filtering new articles by TITLE keyword: '{monitor_title_keyword}'.")
     else:
@@ -327,16 +351,24 @@ def main():
         # Step 1: Retrieve main page and extract latest article URLs
         main_page_html = get_page_content(monitor_full_main_page_url)
         if not main_page_html:
+            if monitor_mode == "production":
+                sleep_time = random.randint(monitor_prod_min_seconds, monitor_prod_max_seconds)
+            else:
+                sleep_time = monitor_interval_seconds
             logging.error(
-                f"Could not load main page: {monitor_full_main_page_url}. Retrying in {monitor_interval_seconds}s.")
-            time.sleep(monitor_interval_seconds)
+                f"Could not load main page: {monitor_full_main_page_url}. Retrying in {sleep_time}s.")
+            time.sleep(sleep_time)
             continue
 
         recent_articles = extract_recent_article_urls(main_page_html, monitor_base_url, monitor_recent_articles_count)
 
         if not recent_articles:
-            logging.info(f"No recent articles found or could not parse. Retrying in {monitor_interval_seconds}s.")
-            time.sleep(monitor_interval_seconds)
+            if monitor_mode == "production":
+                sleep_time = random.randint(monitor_prod_min_seconds, monitor_prod_max_seconds)
+            else:
+                sleep_time = monitor_interval_seconds
+            logging.info(f"No recent articles found or could not parse. Retrying in {sleep_time}s.")
+            time.sleep(sleep_time)
             continue
 
         logging.info(f"Found {len(recent_articles)} recent articles on main page.")
@@ -408,8 +440,12 @@ def main():
         if not new_article_found_and_processed:
             logging.info("No new matching articles found in this cycle.")
 
-        logging.info(f"Waiting for {monitor_interval_seconds} seconds until next check...")
-        time.sleep(monitor_interval_seconds)
+        if monitor_mode == "production":
+            sleep_time = random.randint(monitor_prod_min_seconds, monitor_prod_max_seconds)
+        else:
+            sleep_time = monitor_interval_seconds
+        logging.info(f"Waiting for {sleep_time} seconds until next check...")
+        time.sleep(sleep_time)
 
 
 if __name__ == "__main__":
