@@ -1,3 +1,8 @@
+> **Note:** This service is a component of the [aSentrX Project](https://github.com/f418me/aSentrX). Please see the main repository for a complete architectural overview.
+
+# aSentrix Web Monitor
+
+This service periodically scrapes a configured website for new articles. When a new article matching specific keywords is found, its content is extracted and sent to a configurable webhook URL for further processing.
 
 ## Features
 
