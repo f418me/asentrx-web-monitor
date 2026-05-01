@@ -1,5 +1,21 @@
-.idea
+# OS/editor
+.DS_Store
+.idea/
+
+# Environment and secrets
 .env
-.venv
-venv
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime state/logs
 processed_article_urls.txt
+temp.json
+*.log
