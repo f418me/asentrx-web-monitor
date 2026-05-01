@@ -276,17 +276,18 @@ def extract_content_id_from_url(url: str) -> str:
 
 
 # --- Webservice Communication Function ---
-def send_data_to_webservice(payload_obj: WebMonitorPayload, webservice_url: str):
+def send_data_to_webservice(payload_obj: WebMonitorPayload, webservice_url: str, auth_token: str):
     """
     Constructs the JSON payload and sends it to the specified webservice URL.
     Logs success or failure.
     """
     payload_dict = payload_obj.model_dump(by_alias=True)
+    headers = {"Authorization": f"Bearer {auth_token}"}
 
     try:
         logging.info(
             f"Attempting to send data to {webservice_url} with payload (UUID: {payload_obj.uuid}, URL: {payload_obj.url}).")
-        response = requests.post(webservice_url, json=payload_dict, timeout=10)
+        response = requests.post(webservice_url, json=payload_dict, headers=headers, timeout=10)
         response.raise_for_status()
         logging.info(f"Successfully sent data. Webservice responded with status: {response.status_code}")
         logging.debug(f"Webservice response content: {response.text}")
@@ -310,6 +311,7 @@ def main():
     # --- Configuration from Environment Variables ---
     fly_public_ip = os.getenv("FLY_PUBLIC_IP")
     webservice_url = os.getenv("WEBSERVICE_URL")
+    trade_engine_auth_token = os.getenv("TRADE_ENGINE_AUTH_TOKEN")
 
     monitor_base_url = os.getenv("MONITOR_BASE_URL", "https://www.federalreserve.gov")
     monitor_main_page_path = os.getenv("MONITOR_MAIN_PAGE_PATH", "/")
@@ -330,6 +332,9 @@ def main():
         return
     if not webservice_url:
         logging.error("Error: WEBSERVICE_URL environment variable not set. Exiting.")
+        return
+    if not trade_engine_auth_token:
+        logging.error("Error: TRADE_ENGINE_AUTH_TOKEN environment variable not set. Exiting.")
         return
 
     try:
@@ -499,7 +504,7 @@ def main():
             )
 
             logging.info(f"Sending new article data (ID: {content_id}, Title: '{article_title}') to webservice.")
-            send_data_to_webservice(payload, webservice_url)
+            send_data_to_webservice(payload, webservice_url, trade_engine_auth_token)
             new_article_found_and_processed = True
 
             # Step 7: Mark article as processed

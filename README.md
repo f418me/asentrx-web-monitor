@@ -16,6 +16,7 @@ The monitor is currently tuned for FOMC statement detection:
 * **Robust fallback extraction**: If the old `Recent Developments` homepage structure is missing, the monitor falls back to generic press-release link extraction.
 * **Cold-start protection**: Prevents replaying old FOMC statements when a machine starts with empty local state.
 * **Structured JSON payload**: Sends the exact payload shape expected by the trade-decision engine.
+* **Authenticated delivery**: Adds a bearer token to each trade-engine notification.
 * **Configurable polling**: Supports normal interval mode and randomized production polling.
 * **HTTPS support**: Designed to send payloads to HTTPS endpoints.
 * **Poetry-based workflow**: Uses Poetry for dependency management and local test execution.
@@ -40,6 +41,7 @@ This shape is contract-tested against the `WebMonitorPayload` model in the trade
 ## Important Environment Variables
 
 * `WEBSERVICE_URL` – full destination URL of the trade-decision engine endpoint.
+* `TRADE_ENGINE_AUTH_TOKEN` – bearer token shared with the trade-decision engine's `NOTIFY_AUTH_TOKEN`.
 * `MONITOR_BASE_URL` – base website URL, currently `https://www.federalreserve.gov`.
 * `MONITOR_MAIN_PAGE_PATH` – monitored page path, currently the FOMC press-release index.
 * `MONITOR_TITLE_KEYWORD` – title substring filter used before article fetching; current value: `fomc statement`.

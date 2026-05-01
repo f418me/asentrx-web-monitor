@@ -18,7 +18,7 @@ def _load_engine_web_monitor_payload_model():
     return module.WebMonitorPayload
 
 
-def _load_monitor_web_monitor_payload_model():
+def _load_monitor_module():
     if "dotenv" not in sys.modules:
         dotenv_module = types.ModuleType("dotenv")
         dotenv_module.load_dotenv = lambda: None
@@ -42,7 +42,11 @@ def _load_monitor_web_monitor_payload_model():
     assert spec is not None
     assert spec.loader is not None
     spec.loader.exec_module(module)
-    return module.WebMonitorPayload
+    return module
+
+
+def _load_monitor_web_monitor_payload_model():
+    return _load_monitor_module().WebMonitorPayload
 
 
 def test_monitor_payload_matches_trade_engine_contract():
@@ -78,3 +82,39 @@ def test_monitor_payload_uses_content_id_alias_expected_by_engine():
 
     assert "content-id" in payload_dict
     assert "content_id" not in payload_dict
+
+
+def test_send_data_to_webservice_uses_bearer_auth_header(monkeypatch):
+    monitor_module = _load_monitor_module()
+    payload = monitor_module.WebMonitorPayload(
+        ip="127.0.0.1",
+        url="https://www.federalreserve.gov/newsevents/pressreleases/monetary20260429a.htm",
+        content_id="monetary20260429a",
+        content="Federal Reserve issues FOMC statement.",
+    )
+    captured = {}
+
+    class DummyResponse:
+        status_code = 200
+        text = "{}"
+
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, json, headers, timeout):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        captured["timeout"] = timeout
+        return DummyResponse()
+
+    monkeypatch.setattr(monitor_module.requests, "post", fake_post)
+
+    monitor_module.send_data_to_webservice(
+        payload,
+        "https://engine.example/notify/web-monitor",
+        "secret-token",
+    )
+
+    assert captured["headers"] == {"Authorization": "Bearer secret-token"}
+    assert captured["json"]["content-id"] == "monetary20260429a"
