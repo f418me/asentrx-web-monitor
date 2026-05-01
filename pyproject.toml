@@ -15,6 +15,14 @@ pydantic = "2.11.5"
 pydantic-ai ="0.2.12"
 sentry-sdk = "^2.29.1"
 
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.0"
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "."
+]
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"

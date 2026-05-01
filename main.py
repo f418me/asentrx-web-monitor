@@ -4,8 +4,9 @@ import requests
 import logging
 import uuid
 import random
+import re
 from typing import Optional, Literal, Set, List, Dict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from dotenv import load_dotenv
 from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
@@ -32,6 +33,7 @@ logging.info(f"Logging level set to: {logging.getLevelName(configured_log_level)
 
 # --- Global Configuration and File Access Helpers ---
 PROCESSED_URLS_FILE = "processed_article_urls.txt"
+PRESS_RELEASE_PATH_RE = re.compile(r"/newsevents/pressreleases/[a-z]+20\d{6}[a-z0-9]*\.htm$", re.IGNORECASE)
 
 
 def load_processed_urls() -> Set[str]:
@@ -54,6 +56,8 @@ class WebMonitorPayload(BaseModel):
     Pydantic model for the data sent to the webservice.
     Defines structure, types, default values, and aliases for JSON fields.
     """
+    model_config = ConfigDict(populate_by_name=True)
+
     uuid: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique ID for this payload instance."
@@ -120,8 +124,8 @@ def extract_recent_article_urls(html_content: bytes, base_url: str, count: int =
     soup = BeautifulSoup(html_content, 'html.parser')
     recent_dev_heading = soup.find('h2', string=lambda text: text and 'Recent Developments' in text.strip())
     if not recent_dev_heading:
-        logging.warning("Could not find the 'Recent Developments' heading (H2 tag).")
-        return []
+        logging.info("Could not find the 'Recent Developments' heading (H2 tag). Trying generic press-release extraction.")
+        return extract_press_release_index_urls(soup, base_url, count)
 
     heading_parent_row = recent_dev_heading.find_parent('div', class_=lambda c: c and 'row' in c and 'padded-row' in c)
     if not heading_parent_row:
@@ -157,6 +161,45 @@ def extract_recent_article_urls(html_content: bytes, base_url: str, count: int =
             recent_articles.append({'url': absolute_url, 'title': title})
         else:
             logging.debug(f"Could not find a link in list item {i + 1}.")
+
+    return recent_articles
+
+
+def extract_press_release_index_urls(soup: BeautifulSoup, base_url: str, count: int = 5) -> List[Dict[str, str]]:
+    """
+    Generic fallback for Fed index pages such as yearly press-release or FOMC press-release listings.
+    Extracts unique press-release article links in document order.
+    """
+    container = soup.find('div', id='article') or soup.find('main') or soup.find('body')
+    if not container:
+        logging.warning("Could not find a suitable container for generic press-release extraction.")
+        return []
+
+    recent_articles: List[Dict[str, str]] = []
+    seen_urls: Set[str] = set()
+
+    for link_tag in container.find_all('a', href=True):
+        href = link_tag['href']
+        absolute_url = urljoin(base_url, href)
+        parsed_path = urlparse(absolute_url).path
+        title = link_tag.get_text(" ", strip=True)
+
+        if not title:
+            continue
+        if not PRESS_RELEASE_PATH_RE.search(parsed_path):
+            continue
+        if absolute_url in seen_urls:
+            continue
+
+        seen_urls.add(absolute_url)
+        recent_articles.append({"url": absolute_url, "title": title})
+        if len(recent_articles) >= count:
+            break
+
+    if recent_articles:
+        logging.info(f"Generic fallback extracted {len(recent_articles)} press-release links.")
+    else:
+        logging.warning("Generic fallback did not find any press-release article links.")
 
     return recent_articles
 
@@ -277,6 +320,9 @@ def main():
     monitor_mode = os.getenv("MONITOR_MODE", "normal").lower().strip()
     monitor_prod_min_seconds_str = os.getenv("MONITOR_PROD_MIN_SECONDS", "10")
     monitor_prod_max_seconds_str = os.getenv("MONITOR_PROD_MAX_SECONDS", "20")
+    monitor_bootstrap_skip_existing = os.getenv("MONITOR_BOOTSTRAP_SKIP_EXISTING", "true").lower().strip() in {
+        "1", "true", "yes", "on"
+    }
 
     # Validate essential environment variables
     if not fly_public_ip:
@@ -342,6 +388,11 @@ def main():
     # Load previously processed URLs at startup
     processed_urls = load_processed_urls()
     logging.info(f"Loaded {len(processed_urls)} previously processed article URLs.")
+    bootstrap_pending = monitor_bootstrap_skip_existing and len(processed_urls) == 0
+    if bootstrap_pending:
+        logging.info(
+            "Bootstrap protection is enabled and no processed URLs were found. Existing links from the first successful scrape will be marked as seen and not sent."
+        )
 
     # --- Main Loop ---
     while True:
@@ -372,6 +423,25 @@ def main():
             continue
 
         logging.info(f"Found {len(recent_articles)} recent articles on main page.")
+
+        if bootstrap_pending:
+            for article_info in recent_articles:
+                article_url = article_info["url"]
+                if article_url in processed_urls:
+                    continue
+                save_processed_url(article_url)
+                processed_urls.add(article_url)
+            bootstrap_pending = False
+            logging.info(
+                "Bootstrap protection marked currently visible articles as processed. Waiting for newly published links before sending anything downstream."
+            )
+            if monitor_mode == "production":
+                sleep_time = random.randint(monitor_prod_min_seconds, monitor_prod_max_seconds)
+            else:
+                sleep_time = monitor_interval_seconds
+            logging.info(f"Waiting for {sleep_time} seconds until next check...")
+            time.sleep(sleep_time)
+            continue
 
         # Step 2: Check each recent article
         new_article_found_and_processed = False
