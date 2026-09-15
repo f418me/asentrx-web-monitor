@@ -3,6 +3,7 @@ import sys
 import types
 from pathlib import Path
 
+
 def _load_engine_web_monitor_payload_model():
     engine_models_path = (
         Path(__file__).resolve().parents[2]
@@ -73,9 +74,9 @@ def test_monitor_payload_uses_content_id_alias_expected_by_engine():
     MonitorWebMonitorPayload = _load_monitor_web_monitor_payload_model()
     payload = MonitorWebMonitorPayload(
         ip="127.0.0.1",
-        url="https://www.federalreserve.gov/newsevents/pressreleases/monetary20260429a.htm",
-        content_id="monetary20260429a",
-        content="Federal Reserve issues FOMC statement.",
+        url="https://www.bls.gov/news.release/empsit.htm",
+        content_id="bls-empsit-august-2026-released-2026-09-04",
+        content="Employment Situation News Release.",
     )
 
     payload_dict = payload.model_dump(by_alias=True)
@@ -118,3 +119,79 @@ def test_send_data_to_webservice_uses_bearer_auth_header(monkeypatch):
 
     assert captured["headers"] == {"Authorization": "Bearer secret-token"}
     assert captured["json"]["content-id"] == "monetary20260429a"
+
+
+def test_resolve_monitor_instance_id_falls_back_to_fly_machine_id(monkeypatch):
+    monitor_module = _load_monitor_module()
+    monkeypatch.delenv("FLY_PUBLIC_IP", raising=False)
+    monkeypatch.setenv("FLY_MACHINE_ID", "machine-123")
+
+    assert monitor_module.resolve_monitor_instance_id() == "machine-123"
+
+
+def test_extract_bls_employment_report_metadata_builds_stable_content_id(monkeypatch):
+    monitor_module = _load_monitor_module()
+
+    class FakeSoup:
+        def __init__(self, html_content, parser):
+            self.html_content = html_content
+            self.parser = parser
+
+        def get_text(self, separator="\n", strip=True):
+            return (
+                "Transmission of material in this news release is embargoed until "
+                "USDL-26-1400 8:30 a.m. (ET) Friday, September 4, 2026\n"
+                "THE EMPLOYMENT SITUATION - AUGUST 2026"
+            )
+
+    monkeypatch.setattr(monitor_module, "BeautifulSoup", FakeSoup)
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_article_content",
+        lambda html: "Total nonfarm payroll employment changed little in August (+55,000), and the unemployment rate was 4.2 percent.",
+    )
+
+    metadata = monitor_module.extract_bls_employment_report_metadata(
+        b"<html></html>",
+        "https://www.bls.gov/news.release/empsit.htm",
+    )
+
+    assert metadata is not None
+    assert metadata["title"] == "Employment Situation - August 2026"
+    assert metadata["content_id"] == "bls-empsit-august-2026-released-2026-09-04"
+    assert metadata["url"] == "https://www.bls.gov/news.release/empsit.htm"
+    assert "Total nonfarm payroll employment changed little" in metadata["content"]
+
+
+def test_extract_bls_cpi_report_metadata_builds_stable_content_id(monkeypatch):
+    monitor_module = _load_monitor_module()
+
+    class FakeSoup:
+        def __init__(self, html_content, parser):
+            self.html_content = html_content
+            self.parser = parser
+
+        def get_text(self, separator="\n", strip=True):
+            return (
+                "Transmission of material in this news release is embargoed until "
+                "USDL-26-1500 8:30 a.m. (ET) Friday, September 11, 2026\n"
+                "CONSUMER PRICE INDEX - AUGUST 2026"
+            )
+
+    monkeypatch.setattr(monitor_module, "BeautifulSoup", FakeSoup)
+    monkeypatch.setattr(
+        monitor_module,
+        "extract_article_content",
+        lambda html: "The Consumer Price Index for All Urban Consumers rose 0.2 percent in August. The index for all items less food and energy rose 0.2 percent.",
+    )
+
+    metadata = monitor_module.extract_bls_cpi_report_metadata(
+        b"<html></html>",
+        "https://www.bls.gov/news.release/cpi.htm",
+    )
+
+    assert metadata is not None
+    assert metadata["title"] == "Consumer Price Index - August 2026"
+    assert metadata["content_id"] == "bls-cpi-august-2026-released-2026-09-11"
+    assert metadata["url"] == "https://www.bls.gov/news.release/cpi.htm"
+    assert "Consumer Price Index for All Urban Consumers" in metadata["content"]
