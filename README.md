@@ -9,13 +9,59 @@ The monitor supports three target modes:
 * `nfp`: official BLS Employment Situation release page
 * `cpi`: official BLS Consumer Price Index release page
 
-The current Fly.io configuration is tuned for the September 16, 2026 FOMC decision:
+The current Fly.io configuration uses the 2026 FOMC index:
 
 * It watches `https://www.federalreserve.gov/newsevents/pressreleases/2026-press-fomc.htm`
 * It filters for titles containing `fomc statement`
 * It sends the extracted FOMC statement text to the trade engine when a new matching press-release link appears
 
-## Features
+## Fast FOMC Event Mode
+
+Set `FOMC_RELEASE_AT` to the next official release timestamp with an explicit
+offset. For example, the **past** October 28 decision was
+`2026-10-28T14:00:00-04:00` (18:00 UTC / 19:00 Zurich). Do not reuse that date
+for a future event. An empty value keeps the legacy index-polling mode.
+
+In event mode the monitor first requests the expected official statement URL,
+derived from the New York calendar date. On failure it checks the configured
+index at most once every 30 seconds for alternate same-date statement links.
+Both paths require the official HTTPS host, matching URL and displayed release
+date, exact statement heading, a substantive body with a rate decision and a
+voting paragraph. Redirects, placeholders, wrong dates and incomplete-looking
+responses are rejected and retried. These are conservative structural checks,
+not a guarantee that a publisher has finished editing a page.
+
+Nothing is fetched or sent before the configured time or from ten minutes after
+it onward. Late starts within that window can send the validated event even with
+empty local state: event mode replaces the legacy bootstrap rule with the date
+and time-window checks. After successful delivery, the URL is persisted and the
+event is done. Timeouts and HTTP failures are retried next cycle; HTTP 409 counts
+as already received by the engine. Engine HTTP 200 acknowledges receipt, not a
+successful trade. Its own deduplication and confidence gates still apply.
+
+Source and engine requests use separate reusable sessions; the authentication
+header is only attached to engine requests. Fast source requests have a
+2-second connect / 3-second read timeout, without automatic retries. Normal
+production polling still sleeps the configured 3-8 seconds after each cycle,
+in addition to request time. With ten instances, increasing frequency further
+would also increase total load on the source site. No rate-limit bypass is used.
+
+Structured INFO logs:
+
+* `monitor_http`: UTC timestamp, instance, URL, stage, duration, HTTP status and cache headers.
+* `monitor_parse`: validation/extraction duration per candidate.
+* `monitor_release_detected`: direct/index route, content ID, UUID, cycle duration and time since the scheduled release.
+* `monitor_delivery`: content ID, UUID, response status and duration including engine processing.
+
+Elapsed time uses a monotonic clock. Time since the scheduled release is **not**
+latency since actual publication, which the source does not expose precisely.
+These events go to the monitor's stdout/Fly logs; they are not sent directly to
+Logfire. Retain/export the logs to investigate future events beyond Fly's buffer.
+
+Run offline tests: `poetry run pytest -q`. Set the next event time and matching
+orchestrator schedule before deployment; this change does not deploy or start machines.
+
+## General Features
 
 * **Macro-event monitoring**: Supports FOMC, NFP, and CPI targets.
 * **Robust fallback extraction**: If the old `Recent Developments` homepage structure is missing, the monitor falls back to generic press-release link extraction.

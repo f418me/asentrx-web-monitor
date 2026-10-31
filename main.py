@@ -1,10 +1,12 @@
 import logging
+import json
 import os
 import random
 import re
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Dict, List, Literal, Optional, Set
 from urllib.parse import urljoin, urlparse
 
@@ -27,6 +29,16 @@ logging.basicConfig(level=configured_log_level, format="%(asctime)s - %(levelnam
 logging.info(f"Logging level set to: {logging.getLevelName(configured_log_level)}")
 
 PROCESSED_URLS_FILE = "processed_article_urls.txt"
+SOURCE_SESSION = requests.Session()
+ENGINE_SESSION = requests.Session()
+
+
+def timing_event(event, **fields):
+    logging.info("%s %s", event, json.dumps({
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "instance_id": resolve_monitor_instance_id(), **fields,
+    }))
+
 PRESS_RELEASE_PATH_RE = re.compile(r"/newsevents/pressreleases/[a-z]+20\d{6}[a-z0-9]*\.htm$", re.IGNORECASE)
 BLS_EMPLOYMENT_REPORT_RE = re.compile(r"THE EMPLOYMENT SITUATION\s*-\s*([A-Z]+\s+\d{4})", re.IGNORECASE)
 BLS_CPI_REPORT_RE = re.compile(r"CONSUMER PRICE INDEX\s*-\s*([A-Z]+\s+\d{4})", re.IGNORECASE)
@@ -60,16 +72,20 @@ class WebMonitorPayload(BaseModel):
     ip: str = Field(description="The public IP of the monitor instance.")
 
 
-def get_page_content(url: str) -> Optional[bytes]:
+def get_page_content(url: str, *, stage="source_fetch", timeout=15) -> Optional[bytes]:
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         )
     }
+    started = time.perf_counter()
+    response = None
     try:
         logging.debug(f"Fetching URL: {url}")
-        response = requests.get(url, headers=headers, timeout=15)
+        response = SOURCE_SESSION.get(url, headers=headers, timeout=timeout, allow_redirects=False)
+        if response.status_code in (404, 429) or 300 <= response.status_code < 400:
+            return None
         response.raise_for_status()
         return response.content
     except requests.exceptions.Timeout:
@@ -84,6 +100,13 @@ def get_page_content(url: str) -> Optional[bytes]:
     except requests.exceptions.RequestException as e:
         logging.error(f"An unexpected error occurred fetching {url}: {e}")
         return None
+    finally:
+        timing_event("monitor_http", stage=stage, url=url,
+                     elapsed_ms=round((time.perf_counter() - started) * 1000, 2),
+                     status_code=response.status_code if response is not None else None,
+                     cache={key: response.headers.get(key) for key in
+                            ("Date", "Age", "Cache-Control", "Last-Modified", "X-Cache")}
+                     if response is not None else {})
 
 
 def extract_recent_article_urls(html_content: bytes, base_url: str, count: int = 5) -> List[Dict[str, str]]:
@@ -327,15 +350,20 @@ def extract_bls_cpi_report_metadata(html_content: bytes, page_url: str) -> Optio
 def send_data_to_webservice(payload_obj: WebMonitorPayload, webservice_url: str, auth_token: str):
     payload_dict = payload_obj.model_dump(by_alias=True)
     headers = {"Authorization": f"Bearer {auth_token}"}
-
+    started = time.perf_counter()
+    status = None
     try:
         logging.info(
             f"Attempting to send data to {webservice_url} with payload (UUID: {payload_obj.uuid}, URL: {payload_obj.url})."
         )
-        response = requests.post(webservice_url, json=payload_dict, headers=headers, timeout=10)
+        response = ENGINE_SESSION.post(webservice_url, json=payload_dict, headers=headers, timeout=10)
+        status = response.status_code
+        if status == 409:
+            return True
         response.raise_for_status()
         logging.info(f"Successfully sent data. Webservice responded with status: {response.status_code}")
         logging.debug(f"Webservice response content: {response.text}")
+        return True
     except requests.exceptions.Timeout:
         logging.error(f"Request to webservice timed out after 10 seconds: {webservice_url}")
     except requests.exceptions.ConnectionError as e:
@@ -344,6 +372,126 @@ def send_data_to_webservice(payload_obj: WebMonitorPayload, webservice_url: str,
         logging.error(f"Webservice returned an HTTP error: {e.response.status_code} - {e.response.text}. Response: {e.response.text}")
     except requests.exceptions.RequestException as e:
         logging.error(f"An unexpected error occurred while sending data to webservice: {e}")
+    finally:
+        timing_event("monitor_delivery", content_id=payload_obj.content_id,
+                     uuid=payload_obj.uuid, status_code=status,
+                     elapsed_ms=round((time.perf_counter() - started) * 1000, 2))
+    return False
+
+
+class FomcEventMonitor:
+    """Explicit event window; the index fallback cannot bypass validation."""
+
+    def __init__(self, release_at, index_url, processed_urls):
+        self.release_at = datetime.fromisoformat(release_at)
+        if self.release_at.tzinfo is None:
+            raise ValueError("FOMC_RELEASE_AT requires an explicit UTC offset")
+        self.release_at = self.release_at.astimezone(timezone.utc)
+        self.event_date = self.release_at.astimezone(ZoneInfo("America/New_York")).date()
+        self.direct_url = (
+            "https://www.federalreserve.gov/newsevents/pressreleases/"
+            f"monetary{self.event_date:%Y%m%d}a.htm"
+        )
+        parsed = urlparse(index_url)
+        if parsed.scheme != "https" or parsed.netloc != "www.federalreserve.gov":
+            raise ValueError("FOMC event index must use https://www.federalreserve.gov")
+        self.index_url = index_url
+        self.processed_urls = processed_urls
+        self.next_fallback = 0.0
+        self.done = False
+
+    def valid_content(self, html, url):
+        started = time.perf_counter()
+        try:
+            parsed = urlparse(url)
+            path = rf"/newsevents/pressreleases/monetary{self.event_date:%Y%m%d}[a-z]\.htm"
+            if (parsed.scheme != "https" or parsed.netloc != "www.federalreserve.gov"
+                    or not re.fullmatch(path, parsed.path) or parsed.query):
+                return None
+            soup = BeautifulSoup(html, "html.parser")
+            article = soup.select_one("#article")
+            if article is None:
+                return None
+            heading = article.find(["h1", "h2", "h3"])
+            if not heading or heading.get_text(" ", strip=True).lower() != "federal reserve issues fomc statement":
+                return None
+            date_node = article.select_one(".article__time")
+            if date_node is None:
+                return None
+            try:
+                date = datetime.strptime(date_node.get_text(" ", strip=True), "%B %d, %Y").date()
+            except ValueError:
+                return None
+            if date != self.event_date:
+                return None
+            content = extract_article_content(html)
+            if not content or len(content) < 400:
+                return None
+            if not re.search(
+                r"Committee (?:decided|voted|agreed) to (?:maintain|raise|lower|keep)"
+                r"[^.]{0,160}target range for the federal funds rate[^.]{0,100}\d",
+                content, re.IGNORECASE,
+            ):
+                return None
+            # A voting paragraph near the end guards against partial responses.
+            if not re.search(r"Voting (?:for|against)", content, re.IGNORECASE):
+                return None
+            return content
+        finally:
+            timing_event("monitor_parse", url=url,
+                         elapsed_ms=round((time.perf_counter() - started) * 1000, 2))
+
+    def poll(self, webservice_url, auth_token, instance_id, title_keyword="", keyword=""):
+        now = datetime.now(timezone.utc)
+        if self.done or now < self.release_at or now >= self.release_at + timedelta(minutes=10):
+            return
+        if self.direct_url in self.processed_urls:
+            self.done = True
+            return
+        cycle_start = time.perf_counter()
+        html = get_page_content(self.direct_url, stage="fomc_direct", timeout=(2, 3))
+        valid = None
+        if html:
+            content = self.valid_content(html, self.direct_url)
+            if content:
+                valid = (self.direct_url, content, "direct")
+        if valid is None and time.monotonic() >= self.next_fallback:
+            self.next_fallback = time.monotonic() + 30
+            index = get_page_content(self.index_url, stage="fomc_index", timeout=(2, 3))
+            if index:
+                for item in extract_recent_article_urls(index, "https://www.federalreserve.gov", 5):
+                    url = item["url"]
+                    # Same-date statement candidates only; no off-site fetches.
+                    if (url == self.direct_url or not re.fullmatch(
+                        rf"https://www\.federalreserve\.gov/newsevents/pressreleases/monetary{self.event_date:%Y%m%d}[a-z]\.htm",
+                        url) or item["title"].lower() != "federal reserve issues fomc statement"):
+                        continue
+                    html = get_page_content(url, stage="fomc_fallback_article", timeout=(2, 3))
+                    content = self.valid_content(html, url) if html else None
+                    if content:
+                        valid = (url, content, "index")
+                        break
+        if valid is None:
+            return
+        url, content, route = valid
+        if url in self.processed_urls:
+            self.done = True
+            return
+        if title_keyword not in "federal reserve issues fomc statement" or keyword not in content.lower():
+            return
+        if datetime.now(timezone.utc) >= self.release_at + timedelta(minutes=10):
+            return
+        payload = WebMonitorPayload(ip=instance_id, url=url,
+                                    content_id=extract_content_id_from_url(url), content=content)
+        timing_event("monitor_release_detected", route=route, content_id=payload.content_id,
+                     uuid=payload.uuid, scheduled_release_at=self.release_at.isoformat(),
+                     since_scheduled_release_ms=round(
+                         (datetime.now(timezone.utc) - self.release_at).total_seconds() * 1000, 2),
+                     cycle_elapsed_ms=round((time.perf_counter() - cycle_start) * 1000, 2))
+        if send_data_to_webservice(payload, webservice_url, auth_token):
+            save_processed_url(url)
+            self.processed_urls.add(url)
+            self.done = True
 
 
 def _get_sleep_time(monitor_mode: str, prod_min: int, prod_max: int, normal_interval: int) -> int:
@@ -453,6 +601,16 @@ def main():
         logging.info("No content keyword filter applied.")
 
     processed_urls = load_processed_urls()
+    fomc_event = None
+    if monitor_target_kind == "fomc" and os.getenv("FOMC_RELEASE_AT", "").strip():
+        try:
+            fomc_event = FomcEventMonitor(
+                os.environ["FOMC_RELEASE_AT"].strip(), monitor_full_main_page_url, processed_urls)
+        except ValueError as exc:
+            logging.error("Invalid FOMC event configuration: %s", exc)
+            return
+        logging.info("FOMC event mode: release=%s direct_url=%s; expires ten minutes after release.",
+                     fomc_event.release_at.isoformat(), fomc_event.direct_url)
     logging.info(f"Loaded {len(processed_urls)} previously processed article URLs.")
     bootstrap_pending = monitor_bootstrap_skip_existing and len(processed_urls) == 0
     if bootstrap_pending:
@@ -461,6 +619,12 @@ def main():
         )
 
     while True:
+        if fomc_event is not None:
+            fomc_event.poll(webservice_url, trade_engine_auth_token, monitor_instance_id,
+                            monitor_title_keyword, monitor_keyword)
+            time.sleep(_get_sleep_time(monitor_mode, monitor_prod_min_seconds,
+                                      monitor_prod_max_seconds, monitor_interval_seconds))
+            continue
         logging.info(f"\n--- Starting website check ({time.strftime('%Y-%m-%d %H:%M:%S')}) ---")
         logging.info(f"Monitor instance identifier is: {monitor_instance_id}")
 
@@ -677,3 +841,6 @@ if __name__ == "__main__":
         logging.info("\nProgram terminated by user (Ctrl+C).")
     except Exception as e:
         logging.critical(f"An unhandled error occurred: {e}", exc_info=True)
+    finally:
+        SOURCE_SESSION.close()
+        ENGINE_SESSION.close()

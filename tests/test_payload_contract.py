@@ -1,6 +1,4 @@
 import importlib.util
-import sys
-import types
 from pathlib import Path
 
 
@@ -20,21 +18,6 @@ def _load_engine_web_monitor_payload_model():
 
 
 def _load_monitor_module():
-    if "dotenv" not in sys.modules:
-        dotenv_module = types.ModuleType("dotenv")
-        dotenv_module.load_dotenv = lambda: None
-        sys.modules["dotenv"] = dotenv_module
-
-    if "bs4" not in sys.modules:
-        bs4_module = types.ModuleType("bs4")
-
-        class DummyBeautifulSoup:
-            def __init__(self, *args, **kwargs):
-                pass
-
-        bs4_module.BeautifulSoup = DummyBeautifulSoup
-        sys.modules["bs4"] = bs4_module
-
     spec = importlib.util.spec_from_file_location(
         "web_monitor_main",
         Path(__file__).resolve().parents[1] / "main.py",
@@ -109,7 +92,7 @@ def test_send_data_to_webservice_uses_bearer_auth_header(monkeypatch):
         captured["timeout"] = timeout
         return DummyResponse()
 
-    monkeypatch.setattr(monitor_module.requests, "post", fake_post)
+    monkeypatch.setattr(monitor_module.ENGINE_SESSION, "post", fake_post)
 
     monitor_module.send_data_to_webservice(
         payload,
