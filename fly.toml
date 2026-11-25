@@ -12,19 +12,23 @@ primary_region = 'arn'
   INTERVAL_SECONDS = '60'
   WEBSERVICE_URL = 'https://asentrx-trade-decision-engine.fly.dev/notify/web-monitor'
   LOG_LEVEL='DEBUG'
-  MONITOR_TARGET_KIND='fomc'
-  # Set for each upcoming event with an explicit UTC offset.
-  # Blank keeps legacy index mode; do not reuse a past event timestamp.
+  MONITOR_TARGET_KIND='pce'
+  # Approved Nov 25 event: 14:30 Europe/Zurich = 13:30 UTC.
+  # PCE sends only during [13:30, 13:35) UTC; never replays after expiry.
+  PCE_RELEASE_AT='2026-11-25T13:30:00+00:00'
+  PCE_REFERENCE_MONTH='2026-10'
+  # Retained for switching back to FOMC; blank enables its legacy index mode.
   FOMC_RELEASE_AT=''
-  MONITOR_BASE_URL='https://www.federalreserve.gov'
-  MONITOR_MAIN_PAGE_PATH='/newsevents/pressreleases/2026-press-fomc.htm'
+  MONITOR_BASE_URL='https://www.bea.gov'
+  MONITOR_MAIN_PAGE_PATH='/news/2026/personal-income-and-outlays-october-2026'
   MONITOR_INTERVAL_SECONDS='300'
   MONITOR_RECENT_ARTICLES_COUNT='5'
   MONITOR_MODE='production'
   MONITOR_PROD_MIN_SECONDS='3'
   MONITOR_PROD_MAX_SECONDS='8'
   MONITOR_BOOTSTRAP_SKIP_EXISTING='true'
-  MONITOR_TITLE_KEYWORD='fomc statement'
+  MONITOR_TITLE_KEYWORD='personal income and outlays'
+  MONITOR_KEYWORD=''
 
 [http_service]
   internal_port = 8080

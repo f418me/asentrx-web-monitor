@@ -1,6 +1,9 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 
 def _load_engine_web_monitor_payload_model():
     engine_models_path = (
@@ -51,6 +54,28 @@ def test_monitor_payload_matches_trade_engine_contract():
     assert validated.content_id == "monetary20260429a"
     assert validated.content == payload.content
     assert validated.ip == payload.ip
+    assert validated.source is None
+
+
+@pytest.mark.parametrize("source", [None, "fed", "cpi", "nfp", "pce"])
+def test_optional_source_matches_engine_contract(source):
+    EngineWebMonitorPayload = _load_engine_web_monitor_payload_model()
+    MonitorWebMonitorPayload = _load_monitor_web_monitor_payload_model()
+    payload = MonitorWebMonitorPayload(
+        source=source, ip="test-machine",
+        url="https://www.bea.gov/news/2026/personal-income-and-outlays-october-2026",
+        content_id="bea-pce-2026-10", content="Personal Income and Outlays, October 2026",
+    )
+    validated = EngineWebMonitorPayload.model_validate(payload.model_dump(by_alias=True))
+    assert validated.source == source
+    assert validated.content_id == "bea-pce-2026-10"
+    assert validated.url == payload.url
+
+
+def test_both_models_reject_unknown_source():
+    for model in (_load_engine_web_monitor_payload_model(), _load_monitor_web_monitor_payload_model()):
+        with pytest.raises(ValidationError):
+            model(source="gdp", content="test", ip="test-machine")
 
 
 def test_monitor_payload_uses_content_id_alias_expected_by_engine():
@@ -102,6 +127,7 @@ def test_send_data_to_webservice_uses_bearer_auth_header(monkeypatch):
 
     assert captured["headers"] == {"Authorization": "Bearer secret-token"}
     assert captured["json"]["content-id"] == "monetary20260429a"
+    assert "source" not in captured["json"]  # Legacy wire shape is unchanged.
 
 
 def test_resolve_monitor_instance_id_falls_back_to_fly_machine_id(monkeypatch):

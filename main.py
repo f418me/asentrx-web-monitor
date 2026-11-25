@@ -65,6 +65,7 @@ class WebMonitorPayload(BaseModel):
 
     uuid: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique ID for this payload instance.")
     type: Literal["web-monitor", "truthsocial", "twitter"] = Field(default="web-monitor")
+    source: Optional[Literal["fed", "cpi", "nfp", "pce"]] = None
     url: Optional[str] = Field(default=None, description="The URL of the monitored article or source.")
     username: Optional[str] = Field(default=None, description="Optional username associated with the content.")
     content_id: Optional[str] = Field(default="", alias="content-id")
@@ -349,6 +350,8 @@ def extract_bls_cpi_report_metadata(html_content: bytes, page_url: str) -> Optio
 
 def send_data_to_webservice(payload_obj: WebMonitorPayload, webservice_url: str, auth_token: str):
     payload_dict = payload_obj.model_dump(by_alias=True)
+    if payload_obj.source is None:
+        payload_dict.pop("source")
     headers = {"Authorization": f"Bearer {auth_token}"}
     started = time.perf_counter()
     status = None
@@ -377,6 +380,127 @@ def send_data_to_webservice(payload_obj: WebMonitorPayload, webservice_url: str,
                      uuid=payload_obj.uuid, status_code=status,
                      elapsed_ms=round((time.perf_counter() - started) * 1000, 2))
     return False
+
+
+class PceEventMonitor:
+    """One BEA monthly release, with no index or rolling-page fallback."""
+
+    def __init__(self, release_at, reference_month, page_url, processed_urls):
+        self.release_at = datetime.fromisoformat(release_at)
+        if self.release_at.tzinfo is None:
+            raise ValueError("PCE_RELEASE_AT requires an explicit UTC offset")
+        self.release_at = self.release_at.astimezone(timezone.utc)
+        self.expires_at = self.release_at + timedelta(minutes=5)
+        if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", reference_month):
+            raise ValueError("PCE_REFERENCE_MONTH must be YYYY-MM")
+        reference = datetime.strptime(reference_month, "%Y-%m")
+        self.month = reference.strftime("%B")
+        self.title = f"Personal Income and Outlays, {self.month} {reference.year}"
+        event_date = self.release_at.astimezone(ZoneInfo("America/New_York")).date()
+        self.direct_url = (
+            f"https://www.bea.gov/news/{event_date.year}/"
+            f"personal-income-and-outlays-{self.month.lower()}-{reference.year}"
+        )
+        if page_url != self.direct_url:
+            raise ValueError("PCE target must be the canonical HTTPS BEA release URL for PCE_REFERENCE_MONTH")
+        self.content_id = f"bea-pce-{reference_month}"
+        self.processed_urls = processed_urls
+        self.done = False
+
+    def in_window(self):
+        return self.release_at <= datetime.now(timezone.utc) < self.expires_at
+
+    def valid_content(self, html, url):
+        started = time.perf_counter()
+        try:
+            if not html or url != self.direct_url:
+                return None
+            soup = BeautifulSoup(html, "html.parser")
+            canonical = soup.find("link", rel="canonical")
+            if canonical and canonical.get("href") != self.direct_url:
+                return None
+            article = soup.find("article")
+            if article is None:
+                return None
+            headings = [" ".join(h.get_text(" ", strip=True).split()).lower()
+                        for h in article.find_all("h1")]
+            if [h for h in headings if h != "news release"] != [self.title.lower()]:
+                return None
+            date_node = article.select_one(".field--name-field-release-date")
+            body = article.select_one(".field--name-body")
+            if date_node is None or body is None:
+                return None
+            release_text = " ".join(date_node.get_text(" ", strip=True).split())
+            release_match = re.fullmatch(
+                r"EMBARGOED UNTIL RELEASE AT (\d{1,2}:\d{2})\s*([ap])\.?\s*m\.?\s*"
+                r"(EST|EDT)\s*,\s*([A-Za-z]+\s*,\s*[A-Za-z]+\s+\d{1,2}\s*,\s*\d{4})\.?",
+                release_text, re.IGNORECASE,
+            )
+            if release_match is None:
+                return None
+            hour, period, zone, date = release_match.groups()
+            try:
+                displayed_at = datetime.strptime(
+                    f"{hour} {period}m {re.sub(r'\s*,\s*', ', ', date)}", "%I:%M %p %A, %B %d, %Y"
+                ).replace(tzinfo=ZoneInfo("America/New_York"))
+            except ValueError:
+                return None
+            if displayed_at.tzname() != zone.upper() or displayed_at != self.release_at:
+                return None
+            for tag in body.select("script, style, nav, aside"):
+                tag.decompose()
+            text = " ".join(body.get_text(" ", strip=True).split())
+            if len(text) < 400 or not all(phrase in text.lower() for phrase in (
+                "personal income", "personal consumption expenditures",
+            )):
+                return None
+            # Require monthly and annual headline/core figures in the release body.
+            # A matching title alone can occur on placeholders or stale responses.
+            change = (r"(?:also\s+)?(?:(?:increased|decreased)\s+(?:less than\s+)?"
+                      r"\d+(?:\.\d+)?\s+percent|(?:was|remained) unchanged)")
+            for comparison in ("From the preceding month", "From the same month one year ago"):
+                if not re.search(
+                    rf"{comparison}\s*,\s*the PCE price index for {self.month} {change}\s*\.\s*"
+                    rf"Excluding food and energy\s*,\s*the PCE price index {change}\b",
+                    text, re.IGNORECASE,
+                ):
+                    return None
+            return f"{self.title}\n{release_text}\n\n{text}"
+        finally:
+            timing_event("monitor_parse", source="pce", url=url,
+                         elapsed_ms=round((time.perf_counter() - started) * 1000, 2))
+
+    def poll(self, webservice_url, auth_token, instance_id, title_keyword="", keyword=""):
+        if self.done or not self.in_window() or not auth_token:
+            return
+        if self.direct_url in self.processed_urls or self.content_id in self.processed_urls:
+            self.done = True
+            return
+        cycle_start = time.perf_counter()
+        html = get_page_content(self.direct_url, stage="pce_direct", timeout=(2, 3))
+        content = self.valid_content(html, self.direct_url) if html else None
+        if html and not content:
+            logging.warning("PCE candidate rejected: expected %s at %s with monthly and annual "
+                            "headline/core price figures; retrying only within event window.",
+                            self.title, self.release_at.isoformat())
+        if (not content or title_keyword not in self.title.lower()
+                or keyword not in content.lower()):
+            return
+        payload = WebMonitorPayload(ip=instance_id, source="pce", url=self.direct_url,
+                                    content_id=self.content_id, content=content)
+        timing_event("monitor_release_detected", source="pce", route="direct",
+                     content_id=payload.content_id, uuid=payload.uuid,
+                     scheduled_release_at=self.release_at.isoformat(),
+                     since_scheduled_release_ms=round(
+                         (datetime.now(timezone.utc) - self.release_at).total_seconds() * 1000, 2),
+                     cycle_elapsed_ms=round((time.perf_counter() - cycle_start) * 1000, 2))
+        # Fetching, parsing, and logging can consume the remaining event window.
+        if not self.in_window():
+            return
+        if send_data_to_webservice(payload, webservice_url, auth_token):
+            save_processed_url(self.direct_url)
+            self.processed_urls.add(self.direct_url)
+            self.done = True
 
 
 class FomcEventMonitor:
@@ -522,6 +646,10 @@ def main():
     elif monitor_target_kind == "cpi":
         monitor_base_url = os.getenv("MONITOR_BASE_URL", "https://www.bls.gov")
         monitor_main_page_path = os.getenv("MONITOR_MAIN_PAGE_PATH", "/news.release/cpi.htm")
+    elif monitor_target_kind == "pce":
+        monitor_base_url = os.getenv("MONITOR_BASE_URL", "https://www.bea.gov")
+        monitor_main_page_path = os.getenv(
+            "MONITOR_MAIN_PAGE_PATH", "/news/2026/personal-income-and-outlays-october-2026")
     else:
         monitor_base_url = os.getenv("MONITOR_BASE_URL", "https://www.federalreserve.gov")
         monitor_main_page_path = os.getenv("MONITOR_MAIN_PAGE_PATH", "/newsevents/pressreleases/2026-press-fomc.htm")
@@ -546,8 +674,8 @@ def main():
     if not trade_engine_auth_token:
         logging.error("Error: TRADE_ENGINE_AUTH_TOKEN environment variable not set. Exiting.")
         return
-    if monitor_target_kind not in {"fomc", "nfp", "cpi"}:
-        logging.error(f"Error: MONITOR_TARGET_KIND must be 'fomc', 'nfp', or 'cpi'. Got '{monitor_target_kind}'. Exiting.")
+    if monitor_target_kind not in {"fomc", "nfp", "cpi", "pce"}:
+        logging.error(f"Error: MONITOR_TARGET_KIND must be 'fomc', 'nfp', 'cpi', or 'pce'. Got '{monitor_target_kind}'. Exiting.")
         return
 
     try:
@@ -601,27 +729,38 @@ def main():
         logging.info("No content keyword filter applied.")
 
     processed_urls = load_processed_urls()
-    fomc_event = None
+    event_monitor = None
     if monitor_target_kind == "fomc" and os.getenv("FOMC_RELEASE_AT", "").strip():
         try:
-            fomc_event = FomcEventMonitor(
+            event_monitor = FomcEventMonitor(
                 os.environ["FOMC_RELEASE_AT"].strip(), monitor_full_main_page_url, processed_urls)
         except ValueError as exc:
             logging.error("Invalid FOMC event configuration: %s", exc)
             return
         logging.info("FOMC event mode: release=%s direct_url=%s; expires ten minutes after release.",
-                     fomc_event.release_at.isoformat(), fomc_event.direct_url)
+                     event_monitor.release_at.isoformat(), event_monitor.direct_url)
+    elif monitor_target_kind == "pce":
+        try:
+            event_monitor = PceEventMonitor(
+                os.getenv("PCE_RELEASE_AT", "").strip(), os.getenv("PCE_REFERENCE_MONTH", "").strip(),
+                monitor_full_main_page_url, processed_urls)
+        except ValueError as exc:
+            logging.error("Invalid PCE event configuration: %s", exc)
+            return
+        logging.info("PCE event mode: release=%s expires=%s direct_url=%s content_id=%s.",
+                     event_monitor.release_at.isoformat(), event_monitor.expires_at.isoformat(),
+                     event_monitor.direct_url, event_monitor.content_id)
     logging.info(f"Loaded {len(processed_urls)} previously processed article URLs.")
-    bootstrap_pending = monitor_bootstrap_skip_existing and len(processed_urls) == 0
+    bootstrap_pending = event_monitor is None and monitor_bootstrap_skip_existing and len(processed_urls) == 0
     if bootstrap_pending:
         logging.info(
             "Bootstrap protection is enabled and no processed URLs were found. Existing visible items from the first successful scrape will be marked as seen and not sent."
         )
 
     while True:
-        if fomc_event is not None:
-            fomc_event.poll(webservice_url, trade_engine_auth_token, monitor_instance_id,
-                            monitor_title_keyword, monitor_keyword)
+        if event_monitor is not None:
+            event_monitor.poll(webservice_url, trade_engine_auth_token, monitor_instance_id,
+                               monitor_title_keyword, monitor_keyword)
             time.sleep(_get_sleep_time(monitor_mode, monitor_prod_min_seconds,
                                       monitor_prod_max_seconds, monitor_interval_seconds))
             continue
